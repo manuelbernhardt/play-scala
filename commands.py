@@ -50,3 +50,21 @@ def after(**kargs):
         dotProject = os.path.join(app.path, '.project')
         replaceAll(dotProject, r'org.eclipse.jdt.core.javabuilder', "ch.epfl.lamp.sdt.core.scalabuilder")
         replaceAll(dotProject, r'<natures>', "<natures>\n\t\t<nature>ch.epfl.lamp.sdt.core.scalanature</nature>")
+
+# ~~~~~~~~~~~~~~~~~~~~~~ Idealize
+# This is on purpose not in the after method, we need it to be executed directly when it is called
+if command == 'idea' or command == 'idealize':
+        application_name = app.readConf('application.name')
+        imlFile = os.path.join(app.path, application_name + '.iml')
+        module = inspect.getfile(inspect.currentframe()).replace("commands.py", "")
+        libDir = os.path.join(module, 'lib')
+
+        lXML = '<content url="file://%s">\n      <sourceFolder url="file://%s" isTestSource="false" />\n    </content>\n' % (module, os.path.join(module, 'src').replace('\\', '/'))
+        lXML += '%MODULE_LINKS%'
+        replaceAll(imlFile, r'%MODULE_LINKS%', lXML)
+
+        libClassXML = '<root url="file://%s" />' % (libDir)
+        replaceAll(imlFile, r'%MODULE_LIB_CLASSES%', libClassXML + '%MODULE_LIB_CLASSES%')
+
+        libXML = '<jarDirectory url="file://%s" recursive="false" />\n' % (libDir)
+        replaceAll(imlFile, r'%MODULE_LIBRARIES%', libXML + '%MODULE_LIBRARIES%')
