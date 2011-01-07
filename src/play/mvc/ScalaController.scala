@@ -71,7 +71,7 @@ private[mvc] abstract class ScalaController extends ControllerDelegate with Loca
   def Xml(document: org.w3c.dom.Document)         = new RenderXml(document)
   def Xml(xml: Any)                               = new RenderXml( if(xml != null) xml.toString else "<empty/>" )
   def Json(json: String)                          = new RenderJson(json)
-  def Json(o: Any)                                = new RenderJson(new com.google.gson.Gson().toJson(o))
+  def Json(o: Any)                                = new RenderJson(play.utils.ScalaGsonSerializer.toJson(o))
   def Text(content: Any)                          = new RenderText(if(content != null) content.toString else "")
   def Redirect(url: String)                       = new Redirect(url)
   def Redirect(url: String, permanent: Boolean)   = new Redirect(url, permanent)
