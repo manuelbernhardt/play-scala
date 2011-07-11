@@ -26,6 +26,7 @@ class ScalaPlugin extends PlayPlugin {
         CustomGroovy()
         play.data.binding.Binder.register(classOf[play.db.anorm.Pk[_]], new PkBinder())
         play.data.binding.Binder.register(classOf[Option[_]], new OptionBinder())
+        play.data.binding.Binder.register(classOf[scala.collection.immutable.List[String]], new ImmutableListBinder())
         onConfigurationRead()
 
         // Now scala is activated

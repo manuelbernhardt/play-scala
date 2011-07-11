@@ -5,6 +5,7 @@ import java.lang.annotation.Annotation
 
 import play.data.binding._
 import play.db.anorm._
+import play.mvc.Http.Request
 
 class PkBinder extends TypeBinder[Pk[_]] {
 
@@ -49,4 +50,11 @@ class OptionBinder extends TypeBinder[Option[_]] {
         }
     }
 
+}
+
+class ImmutableListBinder extends TypeBinder[scala.collection.immutable.List[String]] {
+  override def bind(name: String, annotations: Array[Annotation], value: String, actualClass: Class[_], genericType: Type): AnyRef = {
+    val values:Array[String] = Request.current().params.getAll(name)
+    List(values)
+  }
 }
