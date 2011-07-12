@@ -55,6 +55,6 @@ class OptionBinder extends TypeBinder[Option[_]] {
 class ImmutableListBinder extends TypeBinder[scala.collection.immutable.List[String]] {
   override def bind(name: String, annotations: Array[Annotation], value: String, actualClass: Class[_], genericType: Type): AnyRef = {
     val values:Array[String] = Request.current().params.getAll(name)
-    List(values)
+    values.toList
   }
 }
