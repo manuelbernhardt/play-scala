@@ -182,9 +182,15 @@ class ScalaPlugin extends PlayPlugin {
             yield PlayScalaCompiler.scanFiles(p.getRealFile, """^[^.].*[.]scala[.](html|txt)$""".r)).flatten
     }
 
-    def generated:Seq[GeneratedSource] = {
-        ScalaTemplateCompiler.generatedDirectory.listFiles.map { f =>
+    def generatedSource:Seq[GeneratedSource] = {
+        ScalaTemplateCompiler.generatedDirectory.listFiles.filter(_.getName.endsWith("scala")).map { f =>
             GeneratedSource(f)
+        }
+    }
+
+    def generatedText:Seq[GeneratedText] = {
+        ScalaTemplateCompiler.generatedDirectory.listFiles.filter(_.getName.endsWith("plain")).map { f =>
+            GeneratedText(f)
         }
     }
 
@@ -193,7 +199,10 @@ class ScalaPlugin extends PlayPlugin {
     def update() = {
 
         // Sync generated
-        generated.foreach(_.sync())
+        generatedSource.foreach(_.sync())
+
+        if(Play.mode == Play.Mode.DEV)
+          generatedText.foreach(_.sync())
 
         // Generate templates
         templates.foreach(ScalaTemplateCompiler.compile)

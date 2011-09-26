@@ -156,6 +156,26 @@ package play.templates {
 
     }
 
+    case class GeneratedText(file:File) {
+
+      lazy val source = GeneratedSource(new File(file.getAbsolutePath.split("\\.")(0) + ".scala"))
+
+      val separator = "__//__"
+
+      lazy val hash = IO.readContentAsString(file).split(separator)(0)
+
+      def needsRecompilation = {
+        !file.exists() || source.source.isDefined && source.source.get.lastModified() > file.lastModified()
+      }
+
+      def sync() {
+          if (file.exists && !source.source.isDefined) {
+              file.delete()
+          }
+      }
+
+    }
+
     object ScalaTemplateCompiler {
 
         import scala.util.parsing.input.Positional
@@ -180,34 +200,75 @@ package play.templates {
 
         def compile(source:File) {
             val (templateName,generatedSource) = generatedFile(source)
-            if(generatedSource.needRecompilation) {
-                val templateSource = VirtualFile.open(source)
-
-                val generated = templateParser.parser(new CharSequenceReader(templateSource.contentAsString)) match {
-                    case templateParser.Success(parsed, rest) if rest.atEnd => {
-                         val templateType = templateName.takeRight(2).head
-                         val generator = templateType match {
-                             case "html" => generateFinalTemplate _
-                             case "txt" => generateFinalTemplate1 _
-                             case other => error("unsupported extension :"+other)
-                         }
-                         generator(
-                             templateSource,
-                             templateName.dropRight(1).mkString("."),
-                             templateName.takeRight(1).mkString,
-                             parsed
-                         )
-                    }
-                    case templateParser.Success(_, rest) => {
-                        throw new TemplateCompilationError(VirtualFile.open(source), "Not parsed?", rest.pos.line, rest.pos.column)
-                    }
-                    case templateParser.NoSuccess(message, input) => {
-                        throw new TemplateCompilationError(VirtualFile.open(source), message, input.pos.line, input.pos.column)
-                    }
-                }
-
-                IO.writeContent(generated.toString, generatedSource.file)
+            val generatedText = generatedTextFile(source)
+            val templateType = templateName.takeRight(2).head
+            val generator = templateType match {
+                case "html" => generateFinalTemplate _
+                case "txt" => generateFinalTemplate1 _
+                case other => error("unsupported extension :"+other)
             }
+
+            val templateSource = VirtualFile.open(source)
+
+
+            def parse(generate: Template => List[String]) = {
+              templateParser.parser(new CharSequenceReader(templateSource.contentAsString)) match {
+                  case templateParser.Success(parsed, rest) if rest.atEnd => {
+                    generate(parsed)
+                  }
+                  case templateParser.Success(_, rest) => {
+                      throw new TemplateCompilationError(VirtualFile.open(source), "Not parsed?", rest.pos.line, rest.pos.column)
+                  }
+                  case templateParser.NoSuccess(message, input) => {
+                      throw new TemplateCompilationError(VirtualFile.open(source), message, input.pos.line, input.pos.column)
+                  }
+              }
+            }
+
+            if(Play.mode == Play.Mode.PROD && generatedSource.needRecompilation) {
+              val generated = parse { parsed =>
+
+                val generated = generator(templateSource,
+                          templateName.dropRight(1).mkString("."),
+                          templateName.takeRight(1).mkString,
+                          Some(generatedSource.file.getAbsolutePath.split("\\.")(0) + ".plain"),
+                          parsed)
+
+                List(generated._1)
+              }
+              IO.writeContent(generated.head.toString, generatedSource.file)
+            } else if(Play.mode == Play.Mode.DEV && generatedText.needsRecompilation) {
+
+              val generated = parse { parsed =>
+
+                val generatedText = generateTextTemplate(
+                  templateSource,
+                  templateName.dropRight(1).mkString("."),
+                  templateName.takeRight(1).mkString,
+                  parsed,
+                  templateType
+                )
+
+                val generatedSourceCode = generator(templateSource,
+                          templateName.dropRight(1).mkString("."),
+                          templateName.takeRight(1).mkString,
+                          Some(generatedSource.file.getAbsolutePath.split("\\.")(0) + ".plain"),
+                          parsed)
+
+                val needSourceRecompilation = !generatedSource.file.exists || (generatedSource.meta("SOURCEHASH") != generatedSourceCode._2)
+
+                if(needSourceRecompilation) List(generatedSourceCode._1, generatedText) else List(generatedText)
+              }
+
+              if(generated.length == 2) {
+                IO.writeContent(generated(0).toString, generatedSource.file)
+                IO.writeContent(generated(1).toString, generatedText.file)
+              } else {
+                IO.writeContent(generated(0).toString, generatedText.file)
+              }
+
+            }
+
         }
 
         lazy val generatedDirectory = {
@@ -219,6 +280,11 @@ package play.templates {
         def generatedFile(template:File) = {
             val templateName = source2TemplateName(template).split('.')
             templateName -> GeneratedSource(new File(generatedDirectory, templateName.mkString("_") + ".scala"))
+        }
+
+        def generatedTextFile(template:File) = {
+          val templateName = source2TemplateName(template).split('.')
+          GeneratedText(new File(generatedDirectory, templateName.mkString("_") + ".plain"))
         }
 
         @tailrec def source2TemplateName(f:File, suffix:String = ""):String = {
@@ -453,29 +519,80 @@ package play.templates {
 
         }
 
-        def visit(elem:Seq[TemplateTree], previous:Seq[Any]):Seq[Any] = {
+        def visit(elem:Seq[TemplateTree], previous:Seq[Any], textFile: Option[String], position:java.util.concurrent.atomic.AtomicInteger):Seq[Any] = {
             elem match {
                 case head :: tail =>
                     val tripleQuote = "\"\"\""
+                    def plainText(text:String, p:scala.util.parsing.input.Position): Seq[Any] = {
+                      if(Play.mode == Play.Mode.DEV) {
+                        Nil :+ Source("_read_text_(" + position + ", \"" +  textFile.get + "\")", p)
+                      } else {
+                      "format.raw" :+ Source("(", p) :+ tripleQuote :+ text :+ tripleQuote :+ ")"
+                      }
+                    }
                     visit(tail, head match {
-                        case p@Plain(text) => (if(previous.isEmpty) Nil else previous :+ ",") :+ "format.raw" :+ Source("(", p.pos) :+ tripleQuote :+ text :+ tripleQuote :+ ")"
-                        case Display(exp) => (if(previous.isEmpty) Nil else previous :+ ",") :+ "_display_(List(" :+ visit(Seq(exp), Nil) :+ "))"
+                        case p@Plain(text) => position.incrementAndGet(); (if(previous.isEmpty) Nil else previous :+ ",") :+ plainText(text, p.pos)
+                        case Display(exp) => (if(previous.isEmpty) Nil else previous :+ ",") :+ "_display_(List(" :+ visit(Seq(exp), Nil, textFile, position) :+ "))"
                         case ScalaExp(parts) => previous :+ parts.map {
                             case s@Simple(code) => Source(code, s.pos)
-                            case b@Block(whitespace,args,content) => Nil :+ Source(whitespace + "{" + args.getOrElse(""), b.pos) :+ "_display_(List(" :+ visit(content, Nil) :+ "))}"
+                            case b@Block(whitespace,args,content) => Nil :+ Source(whitespace + "{" + args.getOrElse(""), b.pos) :+ "_display_(List(" :+ visit(content, Nil, textFile, position) :+ "))}"
                         }
-                    })
+                    }, textFile, position)
                 case Nil => previous
             }
         }
 
-        def templateCode(template:Template):Seq[Any] = {
+       def _display_(o:Any, format:String):Any = {
+            val f = format match {
+              case "html" => HtmlFormat
+              case "txt" => PlainFormat
+              case other => error("unexpected extension: " + other)
+            }
+            o match {
+                case escapedHtml:Html => escapedHtml
+                case escapedPlain:Plain => escapedPlain
+                case () => f.raw("")
+                case None => f.raw("")
+                case Some(v) => _display_(v, format)
+                case escapeds:Iterable[_] => {
+                  val formatted = escapeds.map(e => _display_(e, format))
+                  if(!formatted.isEmpty) {
+                    formatted.reduceLeft((a, b) => {
+                      if(a.toString.isEmpty && b.toString.isEmpty) ""
+                      else a.toString + "__//__" + b.toString
+                    })
+                  } else {
+                    f.raw("")
+                  }
+                }
+                case string:String => string
+                case _ => f.raw("")
+            }
+        }
+
+        def visitText(elem:Seq[TemplateTree], previous:Seq[Any], format:String):Seq[Any] = {
+          elem match {
+            case head :: tail =>
+              visitText(tail, head match {
+                case p@Plain(text) => (if(previous.isEmpty) Nil else previous) :+ text
+                case Display(exp) => (if(previous.isEmpty) Nil else previous) :+ _display_(visitText(Seq(exp), Nil, format), format)
+                case ScalaExp(parts) => previous :+ parts.map {
+                    case s@Simple(code) => Nil
+                    case b@Block(whitespace,args,content) => Nil :+ _display_(visitText(content, Nil, format), format)
+                }
+                case _ => Nil
+              }, format)
+            case Nil => previous
+          }
+        }
+
+        def templateCode(template:Template, textFile:Option[String] = None):Seq[Any] = {
 
             val defs = (template.sub ++ template.defs).map { i =>
                 i match {
-                    case t:Template if t.name == "" => templateCode(t)
+                    case t:Template if t.name == "" => templateCode(t, textFile)
                     case t:Template => {
-                        Nil :+ """def """ :+ Source(t.name.str, t.name.pos) :+ Source(t.params.str, t.params.pos) :+ " = {" :+ templateCode(t) :+ "};"
+                        Nil :+ """def """ :+ Source(t.name.str, t.name.pos) :+ Source(t.params.str, t.params.pos) :+ " = {" :+ templateCode(t, textFile) :+ "};"
                     }
                     case Def(name, params, block) => {
                         Nil :+ """def """ :+ Source(name.str, name.pos) :+ Source(params.str, params.pos) :+ " = {" :+ block.code :+ "};"
@@ -485,10 +602,12 @@ package play.templates {
 
             val imports = template.imports.map(_.code).mkString("\n")
 
-            Nil :+ imports :+ "\n" :+ defs :+ "\n" :+ "List(" :+ visit(template.content, Nil) :+ ")"
+            Nil :+ imports :+ "\n" :+ defs :+ "\n" :+ "List(" :+ visit(template.content, Nil, textFile, new java.util.concurrent.atomic.AtomicInteger(0)) :+ ")"
         }
 
-      def generateFinalTemplate1(template: VirtualFile, packageName: String, name: String, root:Template) = {
+      def generateFinalTemplate1(template: VirtualFile, packageName: String, name: String, textFile: Option[String], root:Template) = {
+
+            val textFile = if(Play.mode == Play.Mode.DEV) Some(template.getRealFile.getAbsolutePath.split("\\.")(0) + ".plain") else None
 
             val generated = {
                 Nil :+ """
@@ -501,7 +620,7 @@ package play.templates {
 
                         def apply""" :+ Source(root.params.str, root.params.pos) :+ """:Plain = {
                             try {
-                                _display_ {""" :+ templateCode(root) :+ """}
+                                _display_ {""" :+ templateCode(root,textFile) :+ """}
                             } catch {
                                 case e:TemplateExecutionError => throw e
                                 case e => throw Reporter.toHumanException(e)
@@ -516,7 +635,7 @@ package play.templates {
             Source.finalSource(template, generated)
         }
 
-        def generateFinalTemplate(template: VirtualFile, packageName: String, name: String, root:Template) = {
+        def generateFinalTemplate(template: VirtualFile, packageName: String, name: String, textFile: Option[String], root:Template) = {
 
             val generated = {
                 Nil :+ """
@@ -530,7 +649,7 @@ package play.templates {
 
                         def apply""" :+ Source(root.params.str, root.params.pos) :+ """:Html = {
                             try {
-                                _display_ {""" :+ templateCode(root) :+ """}
+                                _display_ {""" :+ templateCode(root,textFile) :+ """}
                             } catch {
                                 case e:TemplateExecutionError => throw e
                                 case e => throw Reporter.toHumanException(e)
@@ -543,6 +662,26 @@ package play.templates {
             }
 
             Source.finalSource(template, generated)
+        }
+
+        def generateTextTemplate(template: VirtualFile, packageName: String, name: String, root:Template, format:String) = {
+            val parsed = visitText(root.content, Nil, format)
+            val hash = Codec.hexSHA1(parsed.mkString)
+            val sep = "__//__"
+            val serialized = if(parsed.isEmpty) {
+              ""
+            } else if(parsed.length == 1) {
+              parsed.head
+            } else {
+              parsed.reduceLeft((r, c) => {
+                if(r.toString.endsWith(sep) && !c.toString.startsWith(sep)) r.toString + c.toString
+                else if(!r.toString.endsWith(sep) && c.toString.startsWith(sep)) r.toString + c.toString
+                else if(!r.toString.endsWith(sep) && !c.toString.startsWith(sep)) r.toString + sep + c.toString
+                else ""
+              })
+            }
+
+            hash + sep + serialized.toString.replaceAll("__//____//__", "__//__")
         }
 
     }
@@ -562,12 +701,14 @@ package play.templates {
             val positions = ListBuffer.empty[(Int,Int)]
             val lines = ListBuffer.empty[(Int,Int)]
             serialize(generatedTokens, scalaCode, positions, lines)
-            scalaCode + """
+            val scalaCodeHash = Codec.hexSHA1(scalaCode.toString)
+            val code = scalaCode + """
                 /*
                     -- GENERATED --
                     DATE: """ + new java.util.Date + """
                     SOURCE: """ + template.relativePath.replaceFirst("\\{[^\\}]*\\}", "") + """
                     HASH: """ + Codec.hexSHA1(template.contentAsString) + """
+                    SOURCEHASH: """ + scalaCodeHash + """
                     MATRIX: """ + positions.map { pos =>
                         pos._1 + "->" + pos._2
                     }.mkString("|") + """
@@ -577,6 +718,8 @@ package play.templates {
                     -- GENERATED --
                 */
             """
+
+            (code.toString, scalaCodeHash)
         }
 
         private def serialize(parts:Seq[Any], source:StringBuilder, positions:ListBuffer[(Int,Int)], lines:ListBuffer[(Int,Int)]) {
@@ -590,6 +733,7 @@ package play.templates {
                 }
                 case Source(code, NoPosition) => source.append(code)
                 case s:Seq[any] => serialize(s, source, positions, lines)
+                case _ =>
             }
         }
 
@@ -648,6 +792,11 @@ package play.templates {
     
 
     case class BaseScalaTemplate[T<:Appendable[T],F<:Format[T]](format: F) {
+
+        def _read_text_(pos:Int,f:String):T = {
+          val array = play.libs.IO.readContentAsString(new File(f)).split("__//__")
+          format.raw(array(pos))
+        }
 
         def _display_(o:Any):T = {
             o match {
